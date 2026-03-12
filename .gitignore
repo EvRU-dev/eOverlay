@@ -1,0 +1,6 @@
+artifacts/
+*.zip
+*.pdb
+*.user
+Thumbs.db
+Desktop.ini
