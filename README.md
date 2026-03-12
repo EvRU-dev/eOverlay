@@ -88,32 +88,6 @@ Use one of these:
 
 `RunOverlay.cmd` forwards to the VBS launcher, so it does not leave a PowerShell console window open.
 
-## Build Release
-
-The project includes a build script that creates:
-
-- a GUI `.exe`;
-- a portable zip with the executable and required companion files;
-- a source zip;
-- SHA256 checksums.
-
-Build command:
-
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\build\Build-Release.ps1
-```
-
-Output folder:
-
-- `artifacts/release/`
-
-Main release files:
-
-- `OverlayMirror-win64/OverlayMirror.exe`
-- `OverlayMirror-win64-<version>.zip`
-- `OverlayMirror-source-<version>.zip`
-- `SHA256SUMS.txt`
-
 ## Limits
 
 - built for Windows 10/11 with DWM enabled;
