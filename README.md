@@ -114,30 +114,6 @@ Main release files:
 - `OverlayMirror-source-<version>.zip`
 - `SHA256SUMS.txt`
 
-## Publish To GitHub
-
-There is also a publish script for pushing the repo and uploading release assets.
-
-Required:
-
-- GitHub token with repo access;
-- owner name;
-- repository name.
-
-Publish command:
-
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\build\Publish-GitHub.ps1 -Owner YOUR_NAME -Repo OverlayMirror -Token YOUR_TOKEN
-```
-
-What it does:
-
-- creates the repo if needed;
-- commits local files;
-- pushes `master`;
-- creates a GitHub Release tagged from `VERSION`;
-- uploads the built `.exe`, portable zip, and source zip.
-
 ## Limits
 
 - built for Windows 10/11 with DWM enabled;
