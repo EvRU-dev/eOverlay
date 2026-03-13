@@ -5,6 +5,8 @@ Tray-first Windows overlay app that can:
 - mirror a live desktop window or browser into a separate overlay;
 - show a formatted text overlay with scroll, alignment, font size, and `**bold**` markup;
 - open a normal embedded web page with navigation controls and zoom;
+- autosave UI state, overlay settings, text, web page state, window positions, and hotkeys;
+- register customizable global hotkeys that work across Windows;
 - hide the overlay and control panel from supported capture apps;
 - run without a visible console window.
 
@@ -66,6 +68,30 @@ Behavior options:
 - `Hide control panel from capture`.
 
 The close button does not exit the app. It hides the window to the tray.
+
+## Autosave And Hotkeys
+
+The app automatically saves its state to:
+
+- `%APPDATA%\OverlayMirror\settings.json`
+
+Saved items include:
+
+- control-panel position;
+- overlay position and size;
+- overlay mode and opacity;
+- text content, alignment, and font size;
+- web URL and zoom;
+- capture exclusion, topmost, click-through, and interactive input flags;
+- custom global hotkeys.
+
+Default hotkeys:
+
+- `Ctrl + Alt + O`: toggle overlay;
+- `Ctrl + Alt + P`: toggle control panel;
+- `Ctrl + Alt + C`: toggle click-through.
+
+You can change or clear these hotkeys in the `Global hotkeys` section of the control panel.
 
 ## Tray Behavior
 

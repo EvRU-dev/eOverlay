@@ -97,7 +97,7 @@ git -C $repoRoot add .
 if (git -C $repoRoot diff --cached --quiet) {
 }
 else {
-    git -C $repoRoot commit -m "Initial release"
+    git -C $repoRoot commit -m ("Release {0}" -f $releaseVersion)
 }
 
 $encodedToken = [Uri]::EscapeDataString($Token)

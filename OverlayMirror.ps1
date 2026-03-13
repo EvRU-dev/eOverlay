@@ -16,6 +16,7 @@ using System.Diagnostics;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Windows.Forms;
 
 public static class OverlayNative
 {
@@ -603,6 +604,110 @@ public static class OverlayNative
         }
     }
 }
+
+public sealed class HotkeyEventArgs : EventArgs
+{
+    public int Id { get; private set; }
+
+    public HotkeyEventArgs(int id)
+    {
+        Id = id;
+    }
+}
+
+public sealed class HotkeyWindow : NativeWindow, IDisposable
+{
+    private const int WM_HOTKEY = 0x0312;
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool UnregisterHotKey(IntPtr hWnd, int id);
+
+    private readonly HashSet<int> registeredIds = new HashSet<int>();
+
+    public event EventHandler<HotkeyEventArgs> HotkeyPressed;
+
+    public HotkeyWindow()
+    {
+        CreateHandle(new CreateParams
+        {
+            Caption = "OverlayMirrorHotkeySink"
+        });
+    }
+
+    public bool Register(int id, uint modifiers, Keys key)
+    {
+        Unregister(id);
+
+        if (Handle == IntPtr.Zero)
+        {
+            return false;
+        }
+
+        bool result = RegisterHotKey(Handle, id, modifiers, (uint)key);
+        if (result)
+        {
+            registeredIds.Add(id);
+        }
+
+        return result;
+    }
+
+    public void Unregister(int id)
+    {
+        if (Handle == IntPtr.Zero)
+        {
+            return;
+        }
+
+        if (registeredIds.Contains(id))
+        {
+            UnregisterHotKey(Handle, id);
+            registeredIds.Remove(id);
+        }
+    }
+
+    public void UnregisterAll()
+    {
+        if (Handle == IntPtr.Zero)
+        {
+            return;
+        }
+
+        foreach (int id in registeredIds.ToArray())
+        {
+            UnregisterHotKey(Handle, id);
+        }
+
+        registeredIds.Clear();
+    }
+
+    protected override void WndProc(ref Message m)
+    {
+        if (m.Msg == WM_HOTKEY)
+        {
+            EventHandler<HotkeyEventArgs> handler = HotkeyPressed;
+            if (handler != null)
+            {
+                handler(this, new HotkeyEventArgs(m.WParam.ToInt32()));
+            }
+        }
+
+        base.WndProc(ref m);
+    }
+
+    public void Dispose()
+    {
+        UnregisterAll();
+
+        if (Handle != IntPtr.Zero)
+        {
+            DestroyHandle();
+        }
+    }
+}
 "@
 
 Add-Type -TypeDefinition $source -ReferencedAssemblies @(
@@ -645,8 +750,10 @@ $script:webCurrentUrl = "https://www.google.com"
 $script:webZoomPercent = 100
 $script:opacitySlider = $null
 $script:opacityValueLabel = $null
+$script:overlayCaptureCheck = $null
 $script:clickThroughCheck = $null
 $script:interactiveInputCheck = $null
+$script:overlayTopMostCheck = $null
 $script:controlTopMostCheck = $null
 $script:controlCaptureCheck = $null
 $script:trayShowControlItem = $null
@@ -660,8 +767,10 @@ $script:clickThroughEnabled = [bool]$StartClickThrough
 $script:interactiveInputEnabled = $false
 $script:overlayMode = "Window"
 $script:overlayOpacityPercent = 100
+$script:overlayTopMostEnabled = $true
 $script:controlTopMostEnabled = $false
 $script:controlCaptureExcluded = $true
+$script:savedTextContent = "Sample overlay text"
 $script:textAlignment = "Center"
 $script:textFontSize = 28
 $script:isExiting = $false
@@ -670,11 +779,724 @@ $script:watchdogTimer = $null
 $script:shuttingDown = $false
 $script:capturedMouseTarget = [IntPtr]::Zero
 $script:capturedMouseButton = [System.Windows.Forms.MouseButtons]::None
+$script:settingsPath = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::ApplicationData)) "OverlayMirror\settings.json"
+$script:settingsSaveTimer = $null
+$script:settingsReady = $false
+$script:settingsSuspend = $false
+$script:loadedOverlayBounds = $null
+$script:loadedControlBounds = $null
+$script:restoreOverlayVisible = $false
+$script:restoreControlVisible = $false
+$script:lastSourceTitle = ""
+$script:lastSourceProcessName = ""
+$script:hotkeyWindow = $null
+$script:hotkeyEditorMap = @{}
+$script:hotkeyConfigs = [ordered]@{}
+$script:theme = [ordered]@{
+    Background = [System.Drawing.Color]::FromArgb(17, 24, 39)
+    Surface = [System.Drawing.Color]::FromArgb(28, 37, 54)
+    SurfaceAlt = [System.Drawing.Color]::FromArgb(34, 46, 68)
+    Accent = [System.Drawing.Color]::FromArgb(82, 156, 255)
+    AccentSoft = [System.Drawing.Color]::FromArgb(56, 93, 148)
+    Border = [System.Drawing.Color]::FromArgb(63, 81, 110)
+    Foreground = [System.Drawing.Color]::FromArgb(241, 245, 249)
+    Muted = [System.Drawing.Color]::FromArgb(154, 166, 187)
+    Input = [System.Drawing.Color]::FromArgb(21, 30, 45)
+    Overlay = [System.Drawing.Color]::FromArgb(5, 10, 18)
+}
+
+function Test-ObjectProperty {
+    param(
+        $Object,
+        [string]$Name
+    )
+
+    return ($null -ne $Object -and $Object.PSObject.Properties.Name -contains $Name)
+}
+
+function Get-FriendlyKeyName {
+    param([int]$KeyCode)
+
+    $key = [System.Windows.Forms.Keys]$KeyCode
+    switch ($key) {
+        ([System.Windows.Forms.Keys]::Prior) { return "Page Up" }
+        ([System.Windows.Forms.Keys]::Next) { return "Page Down" }
+        ([System.Windows.Forms.Keys]::Capital) { return "Caps Lock" }
+        ([System.Windows.Forms.Keys]::Escape) { return "Esc" }
+        ([System.Windows.Forms.Keys]::Return) { return "Enter" }
+        ([System.Windows.Forms.Keys]::Back) { return "Backspace" }
+        ([System.Windows.Forms.Keys]::Snapshot) { return "Print Screen" }
+        default {
+            if ($KeyCode -ge [int][System.Windows.Forms.Keys]::D0 -and $KeyCode -le [int][System.Windows.Forms.Keys]::D9) {
+                return [string]([char]([int]'0' + ($KeyCode - [int][System.Windows.Forms.Keys]::D0)))
+            }
+
+            $converter = New-Object System.Windows.Forms.KeysConverter
+            $value = [string]$converter.ConvertToString($key)
+            if ([string]::IsNullOrWhiteSpace($value)) {
+                return $key.ToString()
+            }
+
+            return $value
+        }
+    }
+}
+
+function Format-HotkeyDisplay {
+    param(
+        [uint32]$Modifiers,
+        [int]$KeyCode
+    )
+
+    if ($KeyCode -le 0) {
+        return ""
+    }
+
+    $parts = New-Object System.Collections.Generic.List[string]
+    if (($Modifiers -band 0x0002) -ne 0) {
+        $parts.Add("Ctrl")
+    }
+    if (($Modifiers -band 0x0001) -ne 0) {
+        $parts.Add("Alt")
+    }
+    if (($Modifiers -band 0x0004) -ne 0) {
+        $parts.Add("Shift")
+    }
+    if (($Modifiers -band 0x0008) -ne 0) {
+        $parts.Add("Win")
+    }
+
+    $parts.Add((Get-FriendlyKeyName -KeyCode $KeyCode))
+    return ($parts -join " + ")
+}
+
+function New-HotkeyConfig {
+    param(
+        [string]$Action,
+        [string]$Label,
+        [int]$Id,
+        [uint32]$Modifiers,
+        [int]$KeyCode
+    )
+
+    return [pscustomobject]@{
+        Action = $Action
+        Label = $Label
+        Id = $Id
+        Modifiers = [uint32]$Modifiers
+        KeyCode = [int]$KeyCode
+        Display = (Format-HotkeyDisplay -Modifiers $Modifiers -KeyCode $KeyCode)
+    }
+}
+
+function Initialize-DefaultHotkeys {
+    $script:hotkeyConfigs = [ordered]@{
+        ToggleOverlay = (New-HotkeyConfig -Action "ToggleOverlay" -Label "Toggle overlay" -Id 1001 -Modifiers 0x0003 -KeyCode ([int][System.Windows.Forms.Keys]::O))
+        ToggleControlPanel = (New-HotkeyConfig -Action "ToggleControlPanel" -Label "Toggle control panel" -Id 1002 -Modifiers 0x0003 -KeyCode ([int][System.Windows.Forms.Keys]::P))
+        ToggleClickThrough = (New-HotkeyConfig -Action "ToggleClickThrough" -Label "Toggle click-through" -Id 1003 -Modifiers 0x0003 -KeyCode ([int][System.Windows.Forms.Keys]::C))
+    }
+}
+
+function Test-IsModifierKey {
+    param([System.Windows.Forms.Keys]$KeyCode)
+
+    switch ($KeyCode) {
+        ([System.Windows.Forms.Keys]::ControlKey) { return $true }
+        ([System.Windows.Forms.Keys]::LControlKey) { return $true }
+        ([System.Windows.Forms.Keys]::RControlKey) { return $true }
+        ([System.Windows.Forms.Keys]::Menu) { return $true }
+        ([System.Windows.Forms.Keys]::LMenu) { return $true }
+        ([System.Windows.Forms.Keys]::RMenu) { return $true }
+        ([System.Windows.Forms.Keys]::ShiftKey) { return $true }
+        ([System.Windows.Forms.Keys]::LShiftKey) { return $true }
+        ([System.Windows.Forms.Keys]::RShiftKey) { return $true }
+        ([System.Windows.Forms.Keys]::LWin) { return $true }
+        ([System.Windows.Forms.Keys]::RWin) { return $true }
+        default { return $false }
+    }
+}
+
+function Convert-SettingsHotkey {
+    param(
+        [pscustomobject]$DefaultConfig,
+        $SavedValue
+    )
+
+    if ($null -eq $SavedValue) {
+        return $DefaultConfig
+    }
+
+    $modifiers = if (Test-ObjectProperty -Object $SavedValue -Name "Modifiers") {
+        [uint32]$SavedValue.Modifiers
+    }
+    else {
+        [uint32]$DefaultConfig.Modifiers
+    }
+
+    $keyCode = if (Test-ObjectProperty -Object $SavedValue -Name "KeyCode") {
+        [int]$SavedValue.KeyCode
+    }
+    else {
+        [int]$DefaultConfig.KeyCode
+    }
+
+    return New-HotkeyConfig -Action $DefaultConfig.Action -Label $DefaultConfig.Label -Id $DefaultConfig.Id -Modifiers $modifiers -KeyCode $keyCode
+}
+
+function Update-HotkeyEditors {
+    foreach ($action in $script:hotkeyEditorMap.Keys) {
+        $editor = $script:hotkeyEditorMap[$action]
+        if ($null -eq $editor -or -not ($script:hotkeyConfigs.Keys -contains $action)) {
+            continue
+        }
+
+        $editor.Text = if ([string]::IsNullOrWhiteSpace($script:hotkeyConfigs[$action].Display)) {
+            "Not assigned"
+        }
+        else {
+            $script:hotkeyConfigs[$action].Display
+        }
+    }
+}
+
+function Register-ConfiguredHotkeys {
+    $failures = New-Object System.Collections.Generic.List[string]
+
+    if ($null -eq $script:hotkeyWindow) {
+        return @()
+    }
+
+    $script:hotkeyWindow.UnregisterAll()
+    foreach ($config in $script:hotkeyConfigs.Values) {
+        if ([int]$config.KeyCode -le 0) {
+            continue
+        }
+
+        $registered = $script:hotkeyWindow.Register(
+            [int]$config.Id,
+            ([uint32]$config.Modifiers -bor 0x4000),
+            [System.Windows.Forms.Keys]$config.KeyCode
+        )
+
+        if (-not $registered) {
+            $failures.Add($config.Action)
+        }
+    }
+
+    return @($failures.ToArray())
+}
+
+function Test-BoundsVisible {
+    param([System.Drawing.Rectangle]$Bounds)
+
+    $virtualScreen = [System.Windows.Forms.SystemInformation]::VirtualScreen
+    return (
+        $Bounds.Width -ge 100 -and
+        $Bounds.Height -ge 80 -and
+        $Bounds.Right -gt ($virtualScreen.Left + 40) -and
+        $Bounds.Left -lt ($virtualScreen.Right - 40) -and
+        $Bounds.Bottom -gt ($virtualScreen.Top + 40) -and
+        $Bounds.Top -lt ($virtualScreen.Bottom - 40)
+    )
+}
+
+function Get-FormBoundsSnapshot {
+    param([System.Windows.Forms.Form]$Form)
+
+    if ($null -eq $Form) {
+        return $null
+    }
+
+    $bounds = if ($Form.WindowState -eq [System.Windows.Forms.FormWindowState]::Normal) {
+        $Form.Bounds
+    }
+    else {
+        $Form.RestoreBounds
+    }
+
+    return [ordered]@{
+        X = [int]$bounds.X
+        Y = [int]$bounds.Y
+        Width = [int]$bounds.Width
+        Height = [int]$bounds.Height
+    }
+}
+
+function Apply-SavedFormBounds {
+    param(
+        [System.Windows.Forms.Form]$Form,
+        $SavedBounds,
+        [switch]$LocationOnly
+    )
+
+    if ($null -eq $Form -or $null -eq $SavedBounds) {
+        return
+    }
+
+    $x = [int]$SavedBounds.X
+    $y = [int]$SavedBounds.Y
+    $width = if ($LocationOnly) { $Form.Width } else { [int]$SavedBounds.Width }
+    $height = if ($LocationOnly) { $Form.Height } else { [int]$SavedBounds.Height }
+    $rect = New-Object System.Drawing.Rectangle($x, $y, $width, $height)
+
+    if (-not (Test-BoundsVisible -Bounds $rect)) {
+        return
+    }
+
+    $Form.StartPosition = [System.Windows.Forms.FormStartPosition]::Manual
+    $Form.Location = New-Object System.Drawing.Point($x, $y)
+
+    if (-not $LocationOnly) {
+        $Form.Size = New-Object System.Drawing.Size($width, $height)
+    }
+}
+
+function Request-SaveSettings {
+    if (-not $script:settingsReady -or $script:settingsSuspend -or $null -eq $script:settingsSaveTimer) {
+        return
+    }
+
+    $script:settingsSaveTimer.Stop()
+    $script:settingsSaveTimer.Start()
+}
+
+function Save-AppSettings {
+    if ($script:settingsSuspend) {
+        return
+    }
+
+    $settingsDir = Split-Path -Path $script:settingsPath -Parent
+    if (-not (Test-Path $settingsDir)) {
+        New-Item -ItemType Directory -Path $settingsDir -Force | Out-Null
+    }
+
+    $textContent = if ($null -ne $script:textInputBox) {
+        [string]$script:textInputBox.Text
+    }
+    else {
+        [string]$script:savedTextContent
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($textContent)) {
+        $script:savedTextContent = $textContent
+    }
+
+    $webUrl = if ($null -ne $script:webUrlBox -and -not [string]::IsNullOrWhiteSpace($script:webUrlBox.Text)) {
+        [string]$script:webUrlBox.Text
+    }
+    else {
+        [string]$script:webCurrentUrl
+    }
+
+    $overlayBounds = if ($null -ne $script:overlayForm) {
+        Get-FormBoundsSnapshot -Form $script:overlayForm
+    }
+    else {
+        $script:loadedOverlayBounds
+    }
+
+    $controlBounds = if ($null -ne $script:controlForm) {
+        Get-FormBoundsSnapshot -Form $script:controlForm
+    }
+    else {
+        $script:loadedControlBounds
+    }
+
+    $hotkeys = [ordered]@{}
+    foreach ($config in $script:hotkeyConfigs.Values) {
+        $hotkeys[$config.Action] = [ordered]@{
+            Modifiers = [uint32]$config.Modifiers
+            KeyCode = [int]$config.KeyCode
+            Display = [string]$config.Display
+        }
+    }
+
+    $settings = [ordered]@{
+        overlayMode = $script:overlayMode
+        overlayOpacityPercent = [int]$script:overlayOpacityPercent
+        overlayCaptureExcluded = [bool]$script:captureExcluded
+        overlayTopMostEnabled = [bool]$script:overlayTopMostEnabled
+        clickThroughEnabled = [bool]$script:clickThroughEnabled
+        interactiveInputEnabled = [bool]$script:interactiveInputEnabled
+        controlTopMostEnabled = [bool]$script:controlTopMostEnabled
+        controlCaptureExcluded = [bool]$script:controlCaptureExcluded
+        text = [ordered]@{
+            content = $script:savedTextContent
+            alignment = $script:textAlignment
+            fontSize = [int]$script:textFontSize
+        }
+        web = [ordered]@{
+            url = $webUrl
+            zoomPercent = [int]$script:webZoomPercent
+        }
+        windows = [ordered]@{
+            overlayVisible = if ($null -ne $script:overlayForm) { [bool]$script:overlayForm.Visible } else { [bool]$script:restoreOverlayVisible }
+            controlVisible = if ($null -ne $script:controlForm) { [bool]$script:controlForm.Visible } else { [bool]$script:restoreControlVisible }
+            overlayBounds = $overlayBounds
+            controlBounds = $controlBounds
+        }
+        lastSource = [ordered]@{
+            title = [string]$script:lastSourceTitle
+            processName = [string]$script:lastSourceProcessName
+        }
+        hotkeys = $hotkeys
+    }
+
+    $json = $settings | ConvertTo-Json -Depth 6
+    Set-Content -Path $script:settingsPath -Value $json -Encoding UTF8
+}
+
+function Load-AppSettings {
+    Initialize-DefaultHotkeys
+
+    if (-not (Test-Path $script:settingsPath)) {
+        return
+    }
+
+    try {
+        $settings = Get-Content -Path $script:settingsPath -Raw | ConvertFrom-Json
+    }
+    catch {
+        return
+    }
+
+    if (Test-ObjectProperty -Object $settings -Name "overlayMode") {
+        $script:overlayMode = [string]$settings.overlayMode
+    }
+
+    if (Test-ObjectProperty -Object $settings -Name "overlayOpacityPercent") {
+        $script:overlayOpacityPercent = [Math]::Max(10, [Math]::Min(100, [int]$settings.overlayOpacityPercent))
+    }
+
+    if (Test-ObjectProperty -Object $settings -Name "overlayCaptureExcluded") {
+        $script:captureExcluded = [bool]$settings.overlayCaptureExcluded
+    }
+
+    if (Test-ObjectProperty -Object $settings -Name "overlayTopMostEnabled") {
+        $script:overlayTopMostEnabled = [bool]$settings.overlayTopMostEnabled
+    }
+
+    if (Test-ObjectProperty -Object $settings -Name "clickThroughEnabled") {
+        $script:clickThroughEnabled = [bool]$settings.clickThroughEnabled
+    }
+
+    if (Test-ObjectProperty -Object $settings -Name "interactiveInputEnabled") {
+        $script:interactiveInputEnabled = [bool]$settings.interactiveInputEnabled
+    }
+
+    if (Test-ObjectProperty -Object $settings -Name "controlTopMostEnabled") {
+        $script:controlTopMostEnabled = [bool]$settings.controlTopMostEnabled
+    }
+
+    if (Test-ObjectProperty -Object $settings -Name "controlCaptureExcluded") {
+        $script:controlCaptureExcluded = [bool]$settings.controlCaptureExcluded
+    }
+
+    if (Test-ObjectProperty -Object $settings -Name "text") {
+        if (Test-ObjectProperty -Object $settings.text -Name "content") {
+            $script:savedTextContent = [string]$settings.text.content
+        }
+        if (Test-ObjectProperty -Object $settings.text -Name "alignment") {
+            $script:textAlignment = [string]$settings.text.alignment
+        }
+        if (Test-ObjectProperty -Object $settings.text -Name "fontSize") {
+            $script:textFontSize = [Math]::Max(10, [Math]::Min(96, [int]$settings.text.fontSize))
+        }
+    }
+
+    if (Test-ObjectProperty -Object $settings -Name "web") {
+        if (Test-ObjectProperty -Object $settings.web -Name "url") {
+            $script:webPendingUrl = [string]$settings.web.url
+            $script:webCurrentUrl = [string]$settings.web.url
+        }
+        if (Test-ObjectProperty -Object $settings.web -Name "zoomPercent") {
+            $script:webZoomPercent = [Math]::Max(25, [Math]::Min(300, [int]$settings.web.zoomPercent))
+        }
+    }
+
+    if (Test-ObjectProperty -Object $settings -Name "windows") {
+        if (Test-ObjectProperty -Object $settings.windows -Name "overlayVisible") {
+            $script:restoreOverlayVisible = [bool]$settings.windows.overlayVisible
+        }
+        if (Test-ObjectProperty -Object $settings.windows -Name "controlVisible") {
+            $script:restoreControlVisible = [bool]$settings.windows.controlVisible
+        }
+        if (Test-ObjectProperty -Object $settings.windows -Name "overlayBounds") {
+            $script:loadedOverlayBounds = $settings.windows.overlayBounds
+        }
+        if (Test-ObjectProperty -Object $settings.windows -Name "controlBounds") {
+            $script:loadedControlBounds = $settings.windows.controlBounds
+        }
+    }
+
+    if (Test-ObjectProperty -Object $settings -Name "lastSource") {
+        if (Test-ObjectProperty -Object $settings.lastSource -Name "title") {
+            $script:lastSourceTitle = [string]$settings.lastSource.title
+        }
+        if (Test-ObjectProperty -Object $settings.lastSource -Name "processName") {
+            $script:lastSourceProcessName = [string]$settings.lastSource.processName
+        }
+    }
+
+    if (Test-ObjectProperty -Object $settings -Name "hotkeys") {
+        foreach ($action in @($script:hotkeyConfigs.Keys)) {
+            $defaultConfig = $script:hotkeyConfigs[$action]
+            if (Test-ObjectProperty -Object $settings.hotkeys -Name $action) {
+                $script:hotkeyConfigs[$action] = Convert-SettingsHotkey -DefaultConfig $defaultConfig -SavedValue $settings.hotkeys.$action
+            }
+        }
+    }
+
+    if ($script:interactiveInputEnabled -and $script:clickThroughEnabled) {
+        $script:clickThroughEnabled = $false
+    }
+}
+
+function Set-ButtonTheme {
+    param(
+        [System.Windows.Forms.ButtonBase]$Control,
+        [bool]$Accent = $false
+    )
+
+    if ($null -eq $Control) {
+        return
+    }
+
+    $Control.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+    $Control.FlatAppearance.BorderSize = 1
+    $Control.FlatAppearance.MouseDownBackColor = if ($Accent) { $script:theme.AccentSoft } else { $script:theme.SurfaceAlt }
+    $Control.FlatAppearance.MouseOverBackColor = if ($Accent) { $script:theme.AccentSoft } else { $script:theme.SurfaceAlt }
+    $Control.BackColor = if ($Accent) { $script:theme.Accent } else { $script:theme.Surface }
+    $Control.ForeColor = $script:theme.Foreground
+}
+
+function Apply-ThemeToTree {
+    param([System.Windows.Forms.Control]$Root)
+
+    if ($null -eq $Root) {
+        return
+    }
+
+    foreach ($control in $Root.Controls) {
+        switch ($control.GetType().Name) {
+            "GroupBox" {
+                $control.BackColor = $script:theme.Surface
+                $control.ForeColor = $script:theme.Foreground
+                $control.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 9.5)
+                $control.Padding = New-Object System.Windows.Forms.Padding(10, 12, 10, 10)
+            }
+            "Label" {
+                $control.ForeColor = if ($control.ForeColor -eq [System.Drawing.Color]::DimGray) { $script:theme.Muted } else { $script:theme.Foreground }
+                $control.BackColor = [System.Drawing.Color]::Transparent
+            }
+            "RichTextBox" {
+                $control.BackColor = $script:theme.Input
+                $control.ForeColor = $script:theme.Foreground
+                $control.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
+            }
+            "TextBox" {
+                $control.BackColor = $script:theme.Input
+                $control.ForeColor = $script:theme.Foreground
+                $control.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
+            }
+            "ComboBox" {
+                $control.BackColor = $script:theme.Input
+                $control.ForeColor = $script:theme.Foreground
+                $control.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+            }
+            "NumericUpDown" {
+                $control.BackColor = $script:theme.Input
+                $control.ForeColor = $script:theme.Foreground
+                $control.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
+            }
+            "CheckBox" {
+                $control.ForeColor = $script:theme.Foreground
+                $control.BackColor = [System.Drawing.Color]::Transparent
+            }
+            "TrackBar" {
+                $control.BackColor = $script:theme.Surface
+                $control.ForeColor = $script:theme.Foreground
+            }
+            "Button" {
+                Set-ButtonTheme -Control $control
+            }
+        }
+
+        Apply-ThemeToTree -Root $control
+    }
+}
+
+function Apply-AppTheme {
+    param(
+        $HeaderPanel,
+        $HeaderSubtitle,
+        $TrayMenu,
+        $PrimaryButtons
+    )
+
+    if ($null -ne $script:overlayForm) {
+        $script:overlayForm.BackColor = $script:theme.Overlay
+        $script:overlayTextLabel.BackColor = $script:theme.Overlay
+    }
+
+    if ($null -ne $script:controlForm) {
+        $script:controlForm.BackColor = $script:theme.Background
+        $script:controlForm.ForeColor = $script:theme.Foreground
+    }
+
+    if ($null -ne $HeaderPanel) {
+        $HeaderPanel.BackColor = $script:theme.SurfaceAlt
+    }
+
+    if ($null -ne $HeaderSubtitle) {
+        $HeaderSubtitle.ForeColor = $script:theme.Muted
+    }
+
+    if ($null -ne $TrayMenu) {
+        $TrayMenu.BackColor = $script:theme.Surface
+        $TrayMenu.ForeColor = $script:theme.Foreground
+        $TrayMenu.ShowImageMargin = $false
+    }
+
+    Apply-ThemeToTree -Root $script:controlForm
+
+    foreach ($button in $PrimaryButtons) {
+        Set-ButtonTheme -Control $button -Accent $true
+    }
+}
+
+function Invoke-HotkeyAction {
+    param([string]$Action)
+
+    switch ($Action) {
+        "ToggleOverlay" {
+            if ($script:overlayForm.Visible) {
+                Hide-OverlayWindow
+                if ($null -ne $script:statusLabel) {
+                    Set-Status "Overlay hidden by hotkey."
+                }
+            }
+            else {
+                Show-OverlayWindow
+                if ($null -ne $script:statusLabel) {
+                    Set-Status "Overlay shown by hotkey."
+                }
+            }
+        }
+        "ToggleControlPanel" {
+            if ($script:controlForm.Visible) {
+                Hide-ControlPanel
+                if ($null -ne $script:statusLabel) {
+                    Set-Status "Control panel hidden by hotkey."
+                }
+            }
+            else {
+                Show-ControlPanel
+                if ($null -ne $script:statusLabel) {
+                    Set-Status "Control panel shown by hotkey."
+                }
+            }
+        }
+        "ToggleClickThrough" {
+            if ($script:interactiveInputEnabled -and -not $script:clickThroughCheck.Checked) {
+                $script:interactiveInputCheck.Checked = $false
+            }
+
+            $script:clickThroughCheck.Checked = -not $script:clickThroughCheck.Checked
+        }
+    }
+}
+
+function Handle-HotkeyEditorKeyDown {
+    param(
+        [System.Windows.Forms.TextBox]$Editor,
+        [System.Windows.Forms.KeyEventArgs]$EventArgs
+    )
+
+    if ($null -eq $Editor -or [string]::IsNullOrWhiteSpace([string]$Editor.Tag)) {
+        return
+    }
+
+    $EventArgs.Handled = $true
+    $EventArgs.SuppressKeyPress = $true
+
+    $action = [string]$Editor.Tag
+    if (-not ($script:hotkeyConfigs.Keys -contains $action)) {
+        return
+    }
+
+    if (($EventArgs.KeyCode -eq [System.Windows.Forms.Keys]::Delete -or $EventArgs.KeyCode -eq [System.Windows.Forms.Keys]::Back) -and $EventArgs.Modifiers -eq [System.Windows.Forms.Keys]::None) {
+        $current = $script:hotkeyConfigs[$action]
+        $script:hotkeyConfigs[$action] = New-HotkeyConfig -Action $current.Action -Label $current.Label -Id $current.Id -Modifiers 0 -KeyCode 0
+        [void](Register-ConfiguredHotkeys)
+        Update-HotkeyEditors
+        Request-SaveSettings
+        if ($null -ne $script:statusLabel) {
+            Set-Status ("Cleared hotkey: {0}." -f $current.Label.ToLowerInvariant())
+        }
+        return
+    }
+
+    if (Test-IsModifierKey -KeyCode $EventArgs.KeyCode) {
+        if ($null -ne $script:statusLabel) {
+            Set-Status "Add a non-modifier key to finish the hotkey."
+        }
+        return
+    }
+
+    $modifiers = [uint32]0
+    if (($EventArgs.Modifiers -band [System.Windows.Forms.Keys]::Control) -ne 0) {
+        $modifiers = $modifiers -bor 0x0002
+    }
+    if (($EventArgs.Modifiers -band [System.Windows.Forms.Keys]::Alt) -ne 0) {
+        $modifiers = $modifiers -bor 0x0001
+    }
+    if (($EventArgs.Modifiers -band [System.Windows.Forms.Keys]::Shift) -ne 0) {
+        $modifiers = $modifiers -bor 0x0004
+    }
+    if (($EventArgs.Modifiers -band [System.Windows.Forms.Keys]::LWin) -ne 0 -or ($EventArgs.Modifiers -band [System.Windows.Forms.Keys]::RWin) -ne 0) {
+        $modifiers = $modifiers -bor 0x0008
+    }
+
+    $keyCode = [int]$EventArgs.KeyCode
+    $isFunctionKey = ($keyCode -ge [int][System.Windows.Forms.Keys]::F1 -and $keyCode -le [int][System.Windows.Forms.Keys]::F24)
+    if ($modifiers -eq 0 -and -not $isFunctionKey) {
+        if ($null -ne $script:statusLabel) {
+            Set-Status "Use Ctrl, Alt, Shift, Win, or an F-key for global hotkeys."
+        }
+        return
+    }
+
+    $previousConfig = $script:hotkeyConfigs[$action]
+    $candidate = New-HotkeyConfig -Action $previousConfig.Action -Label $previousConfig.Label -Id $previousConfig.Id -Modifiers $modifiers -KeyCode $keyCode
+    $script:hotkeyConfigs[$action] = $candidate
+
+    $failures = @(Register-ConfiguredHotkeys)
+    if ($failures -contains $action) {
+        $script:hotkeyConfigs[$action] = $previousConfig
+        [void](Register-ConfiguredHotkeys)
+        Update-HotkeyEditors
+        if ($null -ne $script:statusLabel) {
+            Set-Status ("Could not register {0}. Windows or another app is already using it." -f $candidate.Display)
+        }
+        return
+    }
+
+    Update-HotkeyEditors
+    Request-SaveSettings
+    if ($null -ne $script:statusLabel) {
+        Set-Status ("Saved hotkey: {0} -> {1}." -f $candidate.Label, $candidate.Display)
+    }
+}
+
+Load-AppSettings
 
 function Set-Status {
     param([string]$Message)
 
-    $script:statusLabel.Text = $Message
+    if ($null -ne $script:statusLabel) {
+        $script:statusLabel.Text = $Message
+    }
 }
 
 function Clear-Thumbnail {
@@ -712,6 +1534,7 @@ function Apply-OverlayFlags {
         return
     }
 
+    $script:overlayForm.TopMost = $script:overlayTopMostEnabled
     [void][OverlayNative]::ApplyCaptureExclusion($script:overlayForm.Handle, $script:captureExcluded)
     [OverlayNative]::SetClickThrough($script:overlayForm.Handle, $script:clickThroughEnabled)
     Update-OverlayInteractionUi
@@ -818,6 +1641,8 @@ function Set-WebZoom {
     if ($script:webViewReady -and $null -ne $script:webViewControl -and $null -ne $script:webViewControl.CoreWebView2) {
         $script:webViewControl.ZoomFactor = $Percent / 100.0
     }
+
+    Request-SaveSettings
 }
 
 function Ensure-WebViewControl {
@@ -869,6 +1694,7 @@ function Ensure-WebViewControl {
         }
 
         Update-WebNavigationButtons
+        Request-SaveSettings
         if ($eventArgs.IsSuccess) {
             Set-Status ("Web page loaded: {0}" -f $script:webCurrentUrl)
         }
@@ -891,6 +1717,7 @@ function Ensure-WebViewControl {
         }
 
         Update-WebNavigationButtons
+        Request-SaveSettings
     })
 
     $script:overlayForm.Controls.Add($script:webViewControl)
@@ -1247,6 +2074,8 @@ function Set-OverlayOpacity {
     if ($null -ne $script:overlayForm) {
         $script:overlayForm.Opacity = $Percent / 100.0
     }
+
+    Request-SaveSettings
 }
 
 function Show-OverlayWindow {
@@ -1389,6 +2218,7 @@ function Set-OverlayText {
     param([string]$Text)
 
     $cleanText = if ([string]::IsNullOrWhiteSpace($Text)) { "Sample overlay text" } else { $Text }
+    $script:savedTextContent = $cleanText
 
     Clear-Thumbnail
     if ($null -ne $script:textInputBox) {
@@ -1399,6 +2229,7 @@ function Set-OverlayText {
     $script:overlayTextLabel.Visible = $true
     $script:overlayHint.Visible = $false
     Show-OverlayWindow
+    Request-SaveSettings
     Set-Status "Overlay is showing text mode."
 }
 
@@ -1461,6 +2292,7 @@ function Set-OverlayMode {
         default { "Window" }
     }
     Update-ModeUi
+    Request-SaveSettings
 
     if ($script:overlayMode -eq "Text") {
         $script:overlayHint.Text = "Text overlay mode is ready."
@@ -1496,9 +2328,17 @@ function Exit-OverlayApplication {
     }
 
     $script:isExiting = $true
+    Save-AppSettings
     $script:watchdogTimer.Stop()
     $script:selectionTimer.Stop()
+    if ($null -ne $script:settingsSaveTimer) {
+        $script:settingsSaveTimer.Stop()
+    }
     Clear-Thumbnail
+
+    if ($null -ne $script:hotkeyWindow) {
+        $script:hotkeyWindow.Dispose()
+    }
 
     if ($null -ne $script:notifyIcon) {
         $script:notifyIcon.Visible = $false
@@ -1528,6 +2368,27 @@ function Find-WindowItemByHandle {
 
     foreach ($item in $script:windowPicker.Items) {
         if ($item.Handle -eq $Handle) {
+            return $item
+        }
+    }
+
+    return $null
+}
+
+function Find-WindowItemBySignature {
+    param(
+        [string]$Title,
+        [string]$ProcessName
+    )
+
+    foreach ($item in $script:windowPicker.Items) {
+        $titleMatches = [string]::Equals([string]$item.Title, [string]$Title, [System.StringComparison]::OrdinalIgnoreCase)
+        $processMatches = (
+            [string]::IsNullOrWhiteSpace($ProcessName) -or
+            [string]::Equals([string]$item.ProcessName, [string]$ProcessName, [System.StringComparison]::OrdinalIgnoreCase)
+        )
+
+        if ($titleMatches -and $processMatches) {
             return $item
         }
     }
@@ -1599,10 +2460,13 @@ function Set-OverlaySource {
 
     $script:thumbnailHandle = $thumbnail
     $script:currentSourceHandle = $WindowInfo.Handle
+    $script:lastSourceTitle = [string]$WindowInfo.Title
+    $script:lastSourceProcessName = [string]$WindowInfo.ProcessName
     $script:overlayTextLabel.Visible = $false
     $script:overlayHint.Visible = $false
     Show-OverlayWindow
     Update-ThumbnailLayout
+    Request-SaveSettings
     Set-Status ("Overlay is showing: {0}" -f $WindowInfo.ToString())
 }
 
@@ -1612,19 +2476,20 @@ $script:overlayForm.StartPosition = [System.Windows.Forms.FormStartPosition]::Ma
 $script:overlayForm.Location = New-Object System.Drawing.Point(120, 120)
 $script:overlayForm.Size = New-Object System.Drawing.Size(960, 540)
 $script:overlayForm.MinimumSize = New-Object System.Drawing.Size(320, 180)
-$script:overlayForm.BackColor = [System.Drawing.Color]::Black
+$script:overlayForm.BackColor = $script:theme.Overlay
 $script:overlayForm.ForeColor = [System.Drawing.Color]::White
 $script:overlayForm.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::SizableToolWindow
-$script:overlayForm.TopMost = $true
+$script:overlayForm.TopMost = $script:overlayTopMostEnabled
 $script:overlayForm.ShowInTaskbar = $false
 $script:overlayForm.KeyPreview = $true
+Apply-SavedFormBounds -Form $script:overlayForm -SavedBounds $script:loadedOverlayBounds
 
 $script:overlayHint = New-Object System.Windows.Forms.Label
 $script:overlayHint.Dock = [System.Windows.Forms.DockStyle]::Fill
 $script:overlayHint.Text = "Pick a window in the control panel.`r`nThis overlay will be excluded from capture."
 $script:overlayHint.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
-$script:overlayHint.Font = New-Object System.Drawing.Font("Segoe UI", 16, [System.Drawing.FontStyle]::Regular)
-$script:overlayHint.ForeColor = [System.Drawing.Color]::FromArgb(180, 255, 255, 255)
+$script:overlayHint.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 16, [System.Drawing.FontStyle]::Regular)
+$script:overlayHint.ForeColor = [System.Drawing.Color]::FromArgb(185, 216, 228, 245)
 $script:overlayForm.Controls.Add($script:overlayHint)
 
 $script:overlayTextLabel = New-Object System.Windows.Forms.RichTextBox
@@ -1635,9 +2500,9 @@ $script:overlayTextLabel.ScrollBars = [System.Windows.Forms.RichTextBoxScrollBar
 $script:overlayTextLabel.WordWrap = $true
 $script:overlayTextLabel.DetectUrls = $false
 $script:overlayTextLabel.ShortcutsEnabled = $true
-$script:overlayTextLabel.Font = New-Object System.Drawing.Font("Segoe UI", 28, [System.Drawing.FontStyle]::Regular)
+$script:overlayTextLabel.Font = New-Object System.Drawing.Font("Segoe UI", [float]$script:textFontSize, [System.Drawing.FontStyle]::Regular)
 $script:overlayTextLabel.ForeColor = [System.Drawing.Color]::White
-$script:overlayTextLabel.BackColor = [System.Drawing.Color]::Black
+$script:overlayTextLabel.BackColor = $script:theme.Overlay
 $script:overlayTextLabel.Visible = $false
 $script:overlayForm.Controls.Add($script:overlayTextLabel)
 $script:overlayTextLabel.BringToFront()
@@ -1645,14 +2510,15 @@ $script:overlayTextLabel.BringToFront()
 $script:controlForm = New-Object System.Windows.Forms.Form
 $script:controlForm.Text = "Overlay Mirror Control"
 $script:controlForm.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
-$script:controlForm.Size = New-Object System.Drawing.Size(620, 690)
-$script:controlForm.MinimumSize = New-Object System.Drawing.Size(620, 690)
+$script:controlForm.Size = New-Object System.Drawing.Size(620, 940)
+$script:controlForm.MinimumSize = New-Object System.Drawing.Size(620, 940)
 $script:controlForm.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
 $script:controlForm.MaximizeBox = $false
 $script:controlForm.ShowInTaskbar = $false
 
-$font = New-Object System.Drawing.Font("Segoe UI", 9)
+$font = New-Object System.Drawing.Font("Segoe UI", 9.5)
 $script:controlForm.Font = $font
+Apply-SavedFormBounds -Form $script:controlForm -SavedBounds $script:loadedControlBounds -LocationOnly
 
 $modeLabel = New-Object System.Windows.Forms.Label
 $modeLabel.Location = New-Object System.Drawing.Point(12, 15)
@@ -1724,7 +2590,7 @@ $script:textInputBox.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSing
 $script:textInputBox.ScrollBars = [System.Windows.Forms.RichTextBoxScrollBars]::Vertical
 $script:textInputBox.WordWrap = $true
 $script:textInputBox.DetectUrls = $false
-$script:textInputBox.Text = "Sample overlay text"
+$script:textInputBox.Text = $script:savedTextContent
 $script:textModePanel.Controls.Add($script:textInputBox)
 
 $markupHintLabel = New-Object System.Windows.Forms.Label
@@ -1747,7 +2613,7 @@ $script:textAlignmentPicker.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]
 [void]$script:textAlignmentPicker.Items.Add("Left")
 [void]$script:textAlignmentPicker.Items.Add("Center")
 [void]$script:textAlignmentPicker.Items.Add("Right")
-$script:textAlignmentPicker.SelectedItem = "Center"
+$script:textAlignmentPicker.SelectedItem = $script:textAlignment
 $script:textModePanel.Controls.Add($script:textAlignmentPicker)
 
 $fontSizeLabel = New-Object System.Windows.Forms.Label
@@ -1761,7 +2627,7 @@ $script:textFontSizePicker.Location = New-Object System.Drawing.Point(272, 156)
 $script:textFontSizePicker.Size = New-Object System.Drawing.Size(68, 24)
 $script:textFontSizePicker.Minimum = 10
 $script:textFontSizePicker.Maximum = 96
-$script:textFontSizePicker.Value = 28
+$script:textFontSizePicker.Value = $script:textFontSize
 $script:textModePanel.Controls.Add($script:textFontSizePicker)
 
 $applyTextButton = New-Object System.Windows.Forms.Button
@@ -1786,7 +2652,7 @@ $script:webModePanel.Controls.Add($webUrlLabel)
 $script:webUrlBox = New-Object System.Windows.Forms.TextBox
 $script:webUrlBox.Location = New-Object System.Drawing.Point(58, 22)
 $script:webUrlBox.Size = New-Object System.Drawing.Size(430, 24)
-$script:webUrlBox.Text = "https://www.google.com"
+$script:webUrlBox.Text = $script:webCurrentUrl
 $script:webModePanel.Controls.Add($script:webUrlBox)
 
 $script:webGoButton = New-Object System.Windows.Forms.Button
@@ -1833,7 +2699,7 @@ $script:webZoomPicker.Size = New-Object System.Drawing.Size(60, 24)
 $script:webZoomPicker.Minimum = 25
 $script:webZoomPicker.Maximum = 300
 $script:webZoomPicker.Increment = 25
-$script:webZoomPicker.Value = 100
+$script:webZoomPicker.Value = $script:webZoomPercent
 $script:webModePanel.Controls.Add($script:webZoomPicker)
 
 $webZoomPercentLabel = New-Object System.Windows.Forms.Label
@@ -1892,12 +2758,12 @@ $behaviorPanel.Size = New-Object System.Drawing.Size(590, 116)
 $behaviorPanel.Text = "Behavior"
 $script:controlForm.Controls.Add($behaviorPanel)
 
-$excludeCheck = New-Object System.Windows.Forms.CheckBox
-$excludeCheck.Location = New-Object System.Drawing.Point(12, 22)
-$excludeCheck.Size = New-Object System.Drawing.Size(290, 24)
-$excludeCheck.Checked = $true
-$excludeCheck.Text = "Hide overlay from OBS / Discord / Zoom"
-$behaviorPanel.Controls.Add($excludeCheck)
+$script:overlayCaptureCheck = New-Object System.Windows.Forms.CheckBox
+$script:overlayCaptureCheck.Location = New-Object System.Drawing.Point(12, 22)
+$script:overlayCaptureCheck.Size = New-Object System.Drawing.Size(290, 24)
+$script:overlayCaptureCheck.Checked = $script:captureExcluded
+$script:overlayCaptureCheck.Text = "Hide overlay from OBS / Discord / Zoom"
+$behaviorPanel.Controls.Add($script:overlayCaptureCheck)
 
 $script:clickThroughCheck = New-Object System.Windows.Forms.CheckBox
 $script:clickThroughCheck.Location = New-Object System.Drawing.Point(310, 22)
@@ -1909,28 +2775,28 @@ $behaviorPanel.Controls.Add($script:clickThroughCheck)
 $script:interactiveInputCheck = New-Object System.Windows.Forms.CheckBox
 $script:interactiveInputCheck.Location = New-Object System.Drawing.Point(12, 50)
 $script:interactiveInputCheck.Size = New-Object System.Drawing.Size(200, 24)
-$script:interactiveInputCheck.Checked = $false
+$script:interactiveInputCheck.Checked = $script:interactiveInputEnabled
 $script:interactiveInputCheck.Text = "Interactive input mode"
 $behaviorPanel.Controls.Add($script:interactiveInputCheck)
 
-$topMostCheck = New-Object System.Windows.Forms.CheckBox
-$topMostCheck.Location = New-Object System.Drawing.Point(310, 50)
-$topMostCheck.Size = New-Object System.Drawing.Size(220, 24)
-$topMostCheck.Checked = $true
-$topMostCheck.Text = "Keep overlay above all windows"
-$behaviorPanel.Controls.Add($topMostCheck)
+$script:overlayTopMostCheck = New-Object System.Windows.Forms.CheckBox
+$script:overlayTopMostCheck.Location = New-Object System.Drawing.Point(310, 50)
+$script:overlayTopMostCheck.Size = New-Object System.Drawing.Size(220, 24)
+$script:overlayTopMostCheck.Checked = $script:overlayTopMostEnabled
+$script:overlayTopMostCheck.Text = "Keep overlay above all windows"
+$behaviorPanel.Controls.Add($script:overlayTopMostCheck)
 
 $script:controlTopMostCheck = New-Object System.Windows.Forms.CheckBox
 $script:controlTopMostCheck.Location = New-Object System.Drawing.Point(12, 78)
 $script:controlTopMostCheck.Size = New-Object System.Drawing.Size(220, 24)
-$script:controlTopMostCheck.Checked = $false
+$script:controlTopMostCheck.Checked = $script:controlTopMostEnabled
 $script:controlTopMostCheck.Text = "Keep control panel above all windows"
 $behaviorPanel.Controls.Add($script:controlTopMostCheck)
 
 $script:controlCaptureCheck = New-Object System.Windows.Forms.CheckBox
 $script:controlCaptureCheck.Location = New-Object System.Drawing.Point(310, 78)
 $script:controlCaptureCheck.Size = New-Object System.Drawing.Size(230, 24)
-$script:controlCaptureCheck.Checked = $true
+$script:controlCaptureCheck.Checked = $script:controlCaptureExcluded
 $script:controlCaptureCheck.Text = "Hide control panel from capture"
 $behaviorPanel.Controls.Add($script:controlCaptureCheck)
 
@@ -1946,6 +2812,110 @@ $script:statusLabel.Location = New-Object System.Drawing.Point(12, 612)
 $script:statusLabel.Size = New-Object System.Drawing.Size(590, 20)
 $script:statusLabel.Text = "Ready."
 $script:controlForm.Controls.Add($script:statusLabel)
+
+$headerPanel = New-Object System.Windows.Forms.Panel
+$headerPanel.Location = New-Object System.Drawing.Point(12, 12)
+$headerPanel.Size = New-Object System.Drawing.Size(590, 64)
+$script:controlForm.Controls.Add($headerPanel)
+
+$headerTitle = New-Object System.Windows.Forms.Label
+$headerTitle.Location = New-Object System.Drawing.Point(16, 10)
+$headerTitle.Size = New-Object System.Drawing.Size(360, 24)
+$headerTitle.Text = "Overlay Mirror 1.1"
+$headerTitle.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 16, [System.Drawing.FontStyle]::Regular)
+$headerPanel.Controls.Add($headerTitle)
+
+$headerSubtitle = New-Object System.Windows.Forms.Label
+$headerSubtitle.Location = New-Object System.Drawing.Point(16, 36)
+$headerSubtitle.Size = New-Object System.Drawing.Size(560, 18)
+$headerSubtitle.Text = "Cleaner tray-first controls, autosave, and global Windows hotkeys."
+$headerPanel.Controls.Add($headerSubtitle)
+
+$modeLabel.Location = New-Object System.Drawing.Point(12, 92)
+$script:overlayModePicker.Location = New-Object System.Drawing.Point(112, 88)
+$script:windowModePanel.Location = New-Object System.Drawing.Point(12, 124)
+$script:textModePanel.Location = New-Object System.Drawing.Point(12, 250)
+$script:webModePanel.Location = New-Object System.Drawing.Point(12, 250)
+$opacityPanel.Location = New-Object System.Drawing.Point(12, 448)
+$behaviorPanel.Location = New-Object System.Drawing.Point(12, 540)
+
+$hotkeyPanel = New-Object System.Windows.Forms.GroupBox
+$hotkeyPanel.Location = New-Object System.Drawing.Point(12, 666)
+$hotkeyPanel.Size = New-Object System.Drawing.Size(590, 148)
+$hotkeyPanel.Text = "Global hotkeys"
+$script:controlForm.Controls.Add($hotkeyPanel)
+
+$hotkeyHintLabel = New-Object System.Windows.Forms.Label
+$hotkeyHintLabel.Location = New-Object System.Drawing.Point(12, 24)
+$hotkeyHintLabel.Size = New-Object System.Drawing.Size(566, 20)
+$hotkeyHintLabel.Text = "Click a box and press a combo. Backspace or Delete clears it. Hotkeys work globally in Windows."
+$hotkeyPanel.Controls.Add($hotkeyHintLabel)
+
+$hotkeyRows = @(
+    @{ Action = "ToggleOverlay"; Label = "Toggle overlay"; Y = 50 },
+    @{ Action = "ToggleControlPanel"; Label = "Toggle control"; Y = 82 },
+    @{ Action = "ToggleClickThrough"; Label = "Toggle pass-through"; Y = 114 }
+)
+
+foreach ($row in $hotkeyRows) {
+    $label = New-Object System.Windows.Forms.Label
+    $label.Location = New-Object System.Drawing.Point(12, ([int]$row.Y + 4))
+    $label.Size = New-Object System.Drawing.Size(130, 20)
+    $label.Text = [string]$row.Label
+    $hotkeyPanel.Controls.Add($label)
+
+    $editor = New-Object System.Windows.Forms.TextBox
+    $editor.Location = New-Object System.Drawing.Point(148, [int]$row.Y)
+    $editor.Size = New-Object System.Drawing.Size(292, 24)
+    $editor.ReadOnly = $true
+    $editor.ShortcutsEnabled = $false
+    $editor.TabStop = $true
+    $editor.Tag = [string]$row.Action
+    $editor.Text = "Not assigned"
+    $editor.Add_KeyDown({
+        param($sender, $eventArgs)
+        Handle-HotkeyEditorKeyDown -Editor $sender -EventArgs $eventArgs
+    })
+    $editor.Add_Enter({
+        param($sender, $eventArgs)
+        if ($null -ne $script:statusLabel -and ($script:hotkeyConfigs.Keys -contains [string]$sender.Tag)) {
+            Set-Status ("Press a new hotkey for {0}. Use Backspace or Delete to clear it." -f $script:hotkeyConfigs[[string]$sender.Tag].Label.ToLowerInvariant())
+        }
+    })
+    $script:hotkeyEditorMap[[string]$row.Action] = $editor
+    $hotkeyPanel.Controls.Add($editor)
+
+    $clearButton = New-Object System.Windows.Forms.Button
+    $clearButton.Location = New-Object System.Drawing.Point(448, ([int]$row.Y - 1))
+    $clearButton.Size = New-Object System.Drawing.Size(130, 28)
+    $clearButton.Text = "Clear"
+    $clearButton.Tag = [string]$row.Action
+    $clearButton.Add_Click({
+        param($sender, $eventArgs)
+
+        $action = [string]$sender.Tag
+        if (-not ($script:hotkeyConfigs.Keys -contains $action)) {
+            return
+        }
+
+        $current = $script:hotkeyConfigs[$action]
+        $script:hotkeyConfigs[$action] = New-HotkeyConfig -Action $current.Action -Label $current.Label -Id $current.Id -Modifiers 0 -KeyCode 0
+        [void](Register-ConfiguredHotkeys)
+        Update-HotkeyEditors
+        Request-SaveSettings
+        Set-Status ("Cleared hotkey: {0}." -f $current.Label.ToLowerInvariant())
+    })
+    $hotkeyPanel.Controls.Add($clearButton)
+}
+
+$helpLabel.Location = New-Object System.Drawing.Point(12, 822)
+$helpLabel.Size = New-Object System.Drawing.Size(590, 28)
+$helpLabel.Text = "Settings autosave to %APPDATA%\\OverlayMirror. Close buttons still hide windows to tray."
+$script:statusLabel.Location = New-Object System.Drawing.Point(12, 856)
+$script:statusLabel.Size = New-Object System.Drawing.Size(590, 34)
+$script:statusLabel.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 9.5)
+
+Update-HotkeyEditors
 
 $script:overlayModePicker.Add_SelectedIndexChanged({
     if ($script:overlayModePicker.SelectedItem -eq "Text overlay") {
@@ -1990,6 +2960,15 @@ $applyTextButton.Add_Click({
     Set-OverlayText -Text $script:textInputBox.Text
 })
 
+$script:textInputBox.Add_TextChanged({
+    $script:savedTextContent = [string]$script:textInputBox.Text
+    Request-SaveSettings
+
+    if ($script:overlayMode -eq "Text" -and $script:overlayTextLabel.Visible) {
+        Render-OverlayText
+    }
+})
+
 $script:textAlignmentPicker.Add_SelectedIndexChanged({
     if ($null -ne $script:textAlignmentPicker.SelectedItem) {
         $script:textAlignment = [string]$script:textAlignmentPicker.SelectedItem
@@ -1999,6 +2978,8 @@ $script:textAlignmentPicker.Add_SelectedIndexChanged({
         Render-OverlayText
         Set-Status ("Text alignment set to {0}." -f $script:textAlignment.ToLowerInvariant())
     }
+
+    Request-SaveSettings
 })
 
 $script:textFontSizePicker.Add_ValueChanged({
@@ -2008,6 +2989,8 @@ $script:textFontSizePicker.Add_ValueChanged({
         Render-OverlayText
         Set-Status ("Text font size set to {0}." -f $script:textFontSize)
     }
+
+    Request-SaveSettings
 })
 
 $script:webGoButton.Add_Click({
@@ -2024,6 +3007,10 @@ $script:webUrlBox.Add_KeyDown({
         Set-OverlayMode -Mode "Web"
         Show-WebPage -Url $script:webUrlBox.Text
     }
+})
+
+$script:webUrlBox.Add_TextChanged({
+    Request-SaveSettings
 })
 
 $script:webBackButton.Add_Click({
@@ -2067,8 +3054,8 @@ $script:opacitySlider.Add_Scroll({
     Set-Status ("Overlay opacity set to {0}%." -f $script:opacitySlider.Value)
 })
 
-$excludeCheck.Add_CheckedChanged({
-    $script:captureExcluded = $excludeCheck.Checked
+$script:overlayCaptureCheck.Add_CheckedChanged({
+    $script:captureExcluded = $script:overlayCaptureCheck.Checked
     Apply-OverlayFlags
 
     if ($script:captureExcluded) {
@@ -2077,6 +3064,8 @@ $excludeCheck.Add_CheckedChanged({
     else {
         Set-Status "Capture exclusion is disabled."
     }
+
+    Request-SaveSettings
 })
 
 $script:clickThroughCheck.Add_CheckedChanged({
@@ -2089,6 +3078,8 @@ $script:clickThroughCheck.Add_CheckedChanged({
     else {
         Set-Status "Click-through is disabled."
     }
+
+    Request-SaveSettings
 })
 
 $script:interactiveInputCheck.Add_CheckedChanged({
@@ -2113,10 +3104,20 @@ $script:interactiveInputCheck.Add_CheckedChanged({
 
     Update-OverlayInteractionUi
     Apply-OverlayFlags
+    Request-SaveSettings
 })
 
-$topMostCheck.Add_CheckedChanged({
-    $script:overlayForm.TopMost = $topMostCheck.Checked
+$script:overlayTopMostCheck.Add_CheckedChanged({
+    $script:overlayTopMostEnabled = $script:overlayTopMostCheck.Checked
+    Apply-OverlayFlags
+    Request-SaveSettings
+
+    if ($script:overlayTopMostEnabled) {
+        Set-Status "Overlay topmost is enabled."
+    }
+    else {
+        Set-Status "Overlay topmost is disabled."
+    }
 })
 
 $script:controlTopMostCheck.Add_CheckedChanged({
@@ -2129,6 +3130,8 @@ $script:controlTopMostCheck.Add_CheckedChanged({
     else {
         Set-Status "Control panel topmost is disabled."
     }
+
+    Request-SaveSettings
 })
 
 $script:controlCaptureCheck.Add_CheckedChanged({
@@ -2141,6 +3144,8 @@ $script:controlCaptureCheck.Add_CheckedChanged({
     else {
         Set-Status "Control panel capture exclusion is disabled."
     }
+
+    Request-SaveSettings
 })
 
 $script:overlayForm.Add_MouseDown({
@@ -2269,11 +3274,33 @@ $script:watchdogTimer.Interval = 1500
 $script:watchdogTimer.Add_Tick({
     if ($script:overlayMode -eq "Window" -and $script:currentSourceHandle -ne [IntPtr]::Zero -and -not [OverlayNative]::IsValidWindow($script:currentSourceHandle)) {
         Clear-Thumbnail
+        $script:lastSourceTitle = ""
+        $script:lastSourceProcessName = ""
         Set-Status "The source window was closed. Pick another one."
         Refresh-WindowList
+        Request-SaveSettings
     }
     elseif ($script:overlayMode -eq "Window" -and $script:currentSourceHandle -ne [IntPtr]::Zero) {
         Update-ThumbnailLayout
+    }
+})
+
+$script:settingsSaveTimer = New-Object System.Windows.Forms.Timer
+$script:settingsSaveTimer.Interval = 900
+$script:settingsSaveTimer.Add_Tick({
+    $script:settingsSaveTimer.Stop()
+    Save-AppSettings
+})
+
+$script:hotkeyWindow = New-Object HotkeyWindow
+$script:hotkeyWindow.add_HotkeyPressed({
+    param($sender, $eventArgs)
+
+    foreach ($config in $script:hotkeyConfigs.Values) {
+        if ([int]$config.Id -eq [int]$eventArgs.Id) {
+            Invoke-HotkeyAction -Action $config.Action
+            break
+        }
     }
 })
 
@@ -2295,10 +3322,16 @@ $script:overlayForm.Add_Shown({
 
 $script:overlayForm.Add_SizeChanged({
     Update-ThumbnailLayout
+    Request-SaveSettings
+})
+
+$script:overlayForm.Add_LocationChanged({
+    Request-SaveSettings
 })
 
 $script:overlayForm.Add_VisibleChanged({
     Update-TrayMenu
+    Request-SaveSettings
 })
 
 $script:overlayForm.Add_FormClosing({
@@ -2320,10 +3353,15 @@ $script:controlForm.Add_VisibleChanged({
     }
 
     Update-TrayMenu
+    Request-SaveSettings
 })
 
 $script:controlForm.Add_HandleCreated({
     Apply-ControlFlags
+})
+
+$script:controlForm.Add_LocationChanged({
+    Request-SaveSettings
 })
 
 $script:controlForm.Add_FormClosing({
@@ -2369,8 +3407,14 @@ $exitTrayItem.Add_Click({
     Exit-OverlayApplication
 })
 
+Apply-AppTheme `
+    -HeaderPanel $headerPanel `
+    -HeaderSubtitle $headerSubtitle `
+    -TrayMenu $trayMenu `
+    -PrimaryButtons @($applyWindowButton, $captureActiveButton, $applyTextButton, $script:webGoButton)
+
 $script:notifyIcon = New-Object System.Windows.Forms.NotifyIcon
-$script:notifyIcon.Icon = [System.Drawing.SystemIcons]::Application
+$script:notifyIcon.Icon = [System.Drawing.SystemIcons]::Information
 $script:notifyIcon.Text = "Overlay Mirror"
 $script:notifyIcon.ContextMenuStrip = $trayMenu
 $script:notifyIcon.Visible = $true
@@ -2378,12 +3422,55 @@ $script:notifyIcon.Add_DoubleClick({
     Show-ControlPanel
 })
 
-Set-OverlayMode -Mode "Window"
+$hotkeyFailures = @(Register-ConfiguredHotkeys)
+
+Set-OverlayMode -Mode $script:overlayMode
 Set-OverlayOpacity -Percent $script:overlayOpacityPercent
 Refresh-WindowList
+
+$restoredSource = $null
+if (-not [string]::IsNullOrWhiteSpace($script:lastSourceTitle)) {
+    $restoredSource = Find-WindowItemBySignature -Title $script:lastSourceTitle -ProcessName $script:lastSourceProcessName
+    if ($null -ne $restoredSource) {
+        $script:windowPicker.SelectedItem = $restoredSource
+    }
+}
+
+if ($script:restoreOverlayVisible) {
+    if ($script:overlayMode -eq "Text") {
+        Set-OverlayText -Text $script:savedTextContent
+    }
+    elseif ($script:overlayMode -eq "Web") {
+        Set-OverlayMode -Mode "Web"
+        Show-WebPage -Url $script:webCurrentUrl
+    }
+    else {
+        if ($null -ne $restoredSource) {
+            Set-OverlayMode -Mode "Window"
+            Set-OverlaySource -WindowInfo $restoredSource
+        }
+        else {
+            Show-OverlayWindow
+            Set-Status "Overlay restored. Last source window was not found, so the preview is waiting for a new window."
+        }
+    }
+}
+
+if ($script:restoreControlVisible) {
+    Show-ControlPanel
+}
+
 $script:watchdogTimer.Start()
 Update-TrayMenu
-Set-Status "Overlay Mirror is running in the tray."
+$script:settingsReady = $true
+
+if ($hotkeyFailures.Count -gt 0) {
+    $failedHotkeys = @($hotkeyFailures | ForEach-Object { $script:hotkeyConfigs[$_].Label.ToLowerInvariant() })
+    Set-Status ("Overlay Mirror is running in the tray. Could not register: {0}." -f ($failedHotkeys -join ", "))
+}
+else {
+    Set-Status "Overlay Mirror is running in the tray."
+}
 
 if ($SmokeTest) {
     Apply-OverlayFlags
@@ -2400,6 +3487,12 @@ if ($SmokeTest) {
     }
     if ($null -ne $script:webViewControl) {
         $script:webViewControl.Dispose()
+    }
+    if ($null -ne $script:hotkeyWindow) {
+        $script:hotkeyWindow.Dispose()
+    }
+    if ($null -ne $script:settingsSaveTimer) {
+        $script:settingsSaveTimer.Dispose()
     }
     if ($null -ne $script:overlayForm) {
         $script:overlayForm.Dispose()
