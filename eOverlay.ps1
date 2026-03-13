@@ -633,7 +633,7 @@ public sealed class HotkeyWindow : NativeWindow, IDisposable
     {
         CreateHandle(new CreateParams
         {
-            Caption = "OverlayMirrorHotkeySink"
+            Caption = "eOverlayHotkeySink"
         });
     }
 
@@ -779,7 +779,7 @@ $script:watchdogTimer = $null
 $script:shuttingDown = $false
 $script:capturedMouseTarget = [IntPtr]::Zero
 $script:capturedMouseButton = [System.Windows.Forms.MouseButtons]::None
-$script:settingsPath = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::ApplicationData)) "OverlayMirror\settings.json"
+$script:settingsPath = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::ApplicationData)) "eOverlay\settings.json"
 $script:settingsSaveTimer = $null
 $script:settingsReady = $false
 $script:settingsSuspend = $false
@@ -2471,7 +2471,7 @@ function Set-OverlaySource {
 }
 
 $script:overlayForm = New-Object System.Windows.Forms.Form
-$script:overlayForm.Text = "Overlay Preview"
+$script:overlayForm.Text = "eOverlay Preview"
 $script:overlayForm.StartPosition = [System.Windows.Forms.FormStartPosition]::Manual
 $script:overlayForm.Location = New-Object System.Drawing.Point(120, 120)
 $script:overlayForm.Size = New-Object System.Drawing.Size(960, 540)
@@ -2508,7 +2508,7 @@ $script:overlayForm.Controls.Add($script:overlayTextLabel)
 $script:overlayTextLabel.BringToFront()
 
 $script:controlForm = New-Object System.Windows.Forms.Form
-$script:controlForm.Text = "Overlay Mirror Control"
+$script:controlForm.Text = "eOverlay Control"
 $script:controlForm.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
 $script:controlForm.Size = New-Object System.Drawing.Size(620, 940)
 $script:controlForm.MinimumSize = New-Object System.Drawing.Size(620, 940)
@@ -2821,7 +2821,7 @@ $script:controlForm.Controls.Add($headerPanel)
 $headerTitle = New-Object System.Windows.Forms.Label
 $headerTitle.Location = New-Object System.Drawing.Point(16, 10)
 $headerTitle.Size = New-Object System.Drawing.Size(360, 24)
-$headerTitle.Text = "Overlay Mirror 1.1"
+$headerTitle.Text = "eOverlay"
 $headerTitle.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 16, [System.Drawing.FontStyle]::Regular)
 $headerPanel.Controls.Add($headerTitle)
 
@@ -2910,7 +2910,7 @@ foreach ($row in $hotkeyRows) {
 
 $helpLabel.Location = New-Object System.Drawing.Point(12, 822)
 $helpLabel.Size = New-Object System.Drawing.Size(590, 28)
-$helpLabel.Text = "Settings autosave to %APPDATA%\\OverlayMirror. Close buttons still hide windows to tray."
+$helpLabel.Text = "Settings autosave to %APPDATA%\\eOverlay. Close buttons still hide windows to tray."
 $script:statusLabel.Location = New-Object System.Drawing.Point(12, 856)
 $script:statusLabel.Size = New-Object System.Drawing.Size(590, 34)
 $script:statusLabel.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 9.5)
@@ -3415,7 +3415,7 @@ Apply-AppTheme `
 
 $script:notifyIcon = New-Object System.Windows.Forms.NotifyIcon
 $script:notifyIcon.Icon = [System.Drawing.SystemIcons]::Information
-$script:notifyIcon.Text = "Overlay Mirror"
+$script:notifyIcon.Text = "eOverlay"
 $script:notifyIcon.ContextMenuStrip = $trayMenu
 $script:notifyIcon.Visible = $true
 $script:notifyIcon.Add_DoubleClick({
@@ -3466,10 +3466,10 @@ $script:settingsReady = $true
 
 if ($hotkeyFailures.Count -gt 0) {
     $failedHotkeys = @($hotkeyFailures | ForEach-Object { $script:hotkeyConfigs[$_].Label.ToLowerInvariant() })
-    Set-Status ("Overlay Mirror is running in the tray. Could not register: {0}." -f ($failedHotkeys -join ", "))
+    Set-Status ("eOverlay is running in the tray. Could not register: {0}." -f ($failedHotkeys -join ", "))
 }
 else {
-    Set-Status "Overlay Mirror is running in the tray."
+    Set-Status "eOverlay is running in the tray."
 }
 
 if ($SmokeTest) {
@@ -3506,8 +3506,8 @@ if ($SmokeTest) {
 $script:appContext = New-Object System.Windows.Forms.ApplicationContext
 $script:notifyIcon.ShowBalloonTip(
     3000,
-    "Overlay Mirror",
-    "Overlay Mirror is running in the tray. Double-click the tray icon to open controls.",
+    "eOverlay",
+    "eOverlay is running in the tray. Double-click the tray icon to open controls.",
     [System.Windows.Forms.ToolTipIcon]::Info
 )
 [void][System.Windows.Forms.Application]::Run($script:appContext)

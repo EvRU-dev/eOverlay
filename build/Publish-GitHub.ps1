@@ -29,9 +29,9 @@ else {
 }
 
 $releaseRoot = Join-Path $repoRoot "artifacts\release"
-$portableZip = Join-Path $releaseRoot ("OverlayMirror-win64-{0}.zip" -f $releaseVersion)
-$sourceZip = Join-Path $releaseRoot ("OverlayMirror-source-{0}.zip" -f $releaseVersion)
-$portableExe = Join-Path $releaseRoot "OverlayMirror-win64\OverlayMirror.exe"
+$portableZip = Join-Path $releaseRoot ("eOverlay-win64-{0}.zip" -f $releaseVersion)
+$sourceZip = Join-Path $releaseRoot ("eOverlay-source-{0}.zip" -f $releaseVersion)
+$portableExe = Join-Path $releaseRoot "eOverlay-win64\eOverlay.exe"
 
 foreach ($requiredPath in @($portableZip, $sourceZip, $portableExe)) {
     if (-not (Test-Path $requiredPath)) {
@@ -42,7 +42,7 @@ foreach ($requiredPath in @($portableZip, $sourceZip, $portableExe)) {
 $headers = @{
     Authorization = "Bearer $Token"
     Accept = "application/vnd.github+json"
-    "User-Agent" = "OverlayMirrorPublisher"
+    "User-Agent" = "eOverlayPublisher"
 }
 
 $repoApi = "https://api.github.com/repos/$Owner/$Repo"
@@ -105,7 +105,7 @@ $pushUrl = "https://$encodedToken@github.com/$Owner/$Repo.git"
 git -C $repoRoot push -u $pushUrl master
 
 $tag = "v$releaseVersion"
-$releaseName = "Overlay Mirror $releaseVersion"
+$releaseName = "eOverlay $releaseVersion"
 
 $releaseLookup = $null
 try {
@@ -143,7 +143,7 @@ foreach ($assetPath in @($portableZip, $sourceZip, $portableExe)) {
         -Headers @{
             Authorization = "Bearer $Token"
             Accept = "application/vnd.github+json"
-            "User-Agent" = "OverlayMirrorPublisher"
+            "User-Agent" = "eOverlayPublisher"
             "Content-Type" = "application/octet-stream"
         } `
         -Method Post `

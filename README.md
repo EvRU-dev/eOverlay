@@ -1,4 +1,4 @@
-# Overlay Mirror
+# eOverlay
 
 Tray-first Windows overlay app that can:
 
@@ -56,8 +56,8 @@ This mode uses WebView2. The repository includes the required WinForms wrapper D
 
 The app has two separate windows:
 
-- `Overlay Preview`: the actual overlay window;
-- `Overlay Mirror Control`: the control panel.
+- `eOverlay Preview`: the actual overlay window;
+- `eOverlay Control`: the control panel.
 
 Behavior options:
 
@@ -73,7 +73,7 @@ The close button does not exit the app. It hides the window to the tray.
 
 The app automatically saves its state to:
 
-- `%APPDATA%\OverlayMirror\settings.json`
+- `%APPDATA%\eOverlay\settings.json`
 
 Saved items include:
 
@@ -108,11 +108,11 @@ Tray actions:
 
 Use one of these:
 
-- `RunOverlay.vbs`
-- `RunOverlay.cmd`
-- `OverlayMirror.ps1`
+- `Run-eOverlay.vbs`
+- `Run-eOverlay.cmd`
+- `eOverlay.ps1`
 
-`RunOverlay.cmd` forwards to the VBS launcher, so it does not leave a PowerShell console window open.
+`Run-eOverlay.cmd` forwards to the VBS launcher, so it does not leave a PowerShell console window open.
 
 ## Limits
 

@@ -44,10 +44,10 @@ $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $releaseVersion = Get-VersionValue -RepoRoot $repoRoot
 $artifactRoot = Join-Path $repoRoot "artifacts"
 $releaseRoot = Join-Path $artifactRoot "release"
-$portableRoot = Join-Path $releaseRoot "OverlayMirror-win64"
-$portableExe = Join-Path $portableRoot "OverlayMirror.exe"
-$portableZip = Join-Path $releaseRoot ("OverlayMirror-win64-{0}.zip" -f $releaseVersion)
-$sourceZip = Join-Path $releaseRoot ("OverlayMirror-source-{0}.zip" -f $releaseVersion)
+$portableRoot = Join-Path $releaseRoot "eOverlay-win64"
+$portableExe = Join-Path $portableRoot "eOverlay.exe"
+$portableZip = Join-Path $releaseRoot ("eOverlay-win64-{0}.zip" -f $releaseVersion)
+$sourceZip = Join-Path $releaseRoot ("eOverlay-source-{0}.zip" -f $releaseVersion)
 $checksumsFile = Join-Path $releaseRoot "SHA256SUMS.txt"
 $vendorRoot = Join-Path $repoRoot "vendor\webview2"
 
@@ -69,7 +69,7 @@ if (-not (Test-Path (Join-Path $vendorRoot "Microsoft.Web.WebView2.WinForms.dll"
 Ensure-Ps2Exe
 
 Invoke-ps2exe `
-    -inputFile (Join-Path $repoRoot "OverlayMirror.ps1") `
+    -inputFile (Join-Path $repoRoot "eOverlay.ps1") `
     -outputFile $portableExe `
     -noConsole `
     -STA `
@@ -77,10 +77,10 @@ Invoke-ps2exe `
     -winFormsDPIAware `
     -supportOS `
     -longPaths `
-    -title "Overlay Mirror" `
+    -title "eOverlay" `
     -description "Tray-first overlay tool for window preview, text, and web pages." `
     -company "eshap" `
-    -product "Overlay Mirror" `
+    -product "eOverlay" `
     -copyright "Copyright (c) 2026 eshap" `
     -version $releaseVersion
 
